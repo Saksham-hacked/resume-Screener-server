@@ -31,11 +31,21 @@ app.use(morgan('dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+
 app.use('/api/jd', jdRoutes);
 app.use('/api/screening', screeningRoutes);
 app.use('/api/sessions', sessionRoutes);
 
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    success: true, 
+    message: 'Server is alive',
+    timestamp: new Date().toISOString()
+  })
+})
+
 app.use(errorHandler);
+
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
