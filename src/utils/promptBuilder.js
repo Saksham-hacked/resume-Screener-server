@@ -2,47 +2,62 @@ const MAX_RESUME_CHARS = 4000;
 const MAX_JD_CHARS = 2500;
 
 const buildScreeningPrompt = (jdText, resumeText, weightages) => {
-  const jd     = jdText.length     > MAX_JD_CHARS     ? jdText.slice(0, MAX_JD_CHARS)         + '...' : jdText;
-  const resume = resumeText.length > MAX_RESUME_CHARS  ? resumeText.slice(0, MAX_RESUME_CHARS) + '...' : resumeText;
+  const jd = jdText.length > MAX_JD_CHARS ? jdText.slice(0, MAX_JD_CHARS) + '...' : jdText;
+  const resume = resumeText.length > MAX_RESUME_CHARS ? resumeText.slice(0, MAX_RESUME_CHARS) + '...' : resumeText;
 
-  const total = weightages.technicalSkills + weightages.experience + weightages.education + weightages.softSkills;
-  const pct   = (v) => total > 0 ? ((v / total) * 100).toFixed(0) + '%' : '25%';
+  const total =
+    weightages.technicalSkills +
+    weightages.experience +
+    weightages.education +
+    weightages.softSkills;
 
-  return `You are a strict, senior technical recruiter at a competitive tech company. Your job is to critically evaluate candidates and surface only the truly qualified ones. Most candidates will NOT be a strong fit — be honest and rigorous.
+  const pct = (v) => (total > 0 ? ((v / total) * 100).toFixed(0) + '%' : '25%');
 
-DIMENSION WEIGHTS:
+  return `You are a brutally honest hiring manager at a fast-growing, high-performance startup with hundreds of applicants. You REJECT most candidates. Your reputation depends on recommending only genuinely qualified people — false positives waste the team's time.
+
+DIMENSION WEIGHTS (employer's priorities):
 - Technical Skills : ${pct(weightages.technicalSkills)}
 - Experience       : ${pct(weightages.experience)}
 - Education        : ${pct(weightages.education)}
 - Soft Skills      : ${pct(weightages.softSkills)}
 
-STRICT SCORING RUBRIC — read carefully before scoring:
-  90-100 : Exceptional. Candidate exceeds every requirement. Rare — reserve for near-perfect matches only.
-  75-89  : Strong match. Meets most requirements with relevant depth. Minor gaps only.
-  55-74  : Moderate match. Meets some requirements but has clear, meaningful gaps.
-  35-54  : Weak match. Meets few requirements. Significant skill or experience gaps.
-  0-34   : Poor match. Does not meet the core requirements of the role.
+════════════════════════════════════════
+MANDATORY SCORING PROCESS — follow in order:
+════════════════════════════════════════
 
-CALIBRATION EXAMPLES:
-  Technical Skills = 90: Candidate has used every major technology in the JD in production, with demonstrable outcomes.
-  Technical Skills = 65: Candidate knows some technologies but lacks depth in key areas listed in the JD.
-  Technical Skills = 30: Candidate has surface-level or unrelated technical skills.
+STEP 1 — Extract required skills/qualifications from the JD.
+STEP 2 — For each requirement, check if the resume explicitly demonstrates it.
+STEP 3 — Count matched vs unmatched requirements per dimension.
+STEP 4 — Apply the penalty table below to arrive at a score.
+STEP 5 — Return the structured output.
 
-  Experience = 90: Years of experience and project scope directly mirrors what the JD asks for.
-  Experience = 60: Some relevant experience but limited in scope, seniority, or domain.
-  Experience = 25: Little to no relevant experience for this specific role.
+PENALTY TABLE:
+  100% of requirements met, with depth  → 85-100
+  80% of requirements met               → 70-84
+  60% of requirements met               → 55-69
+  40% of requirements met               → 35-54
+  < 40% of requirements met             → 0-34
 
-IMPORTANT RULES:
-  - A candidate with 0-2 years of experience applying for a senior role should score ≤ 50 on Experience.
-  - Missing required skills from the JD must significantly lower the Technical Skills score.
-  - Do not give benefit of the doubt. Score what is written, not what might be implied.
-  - Scores above 85 must be genuinely justified by strong evidence in the resume.
-  - A "management.pdf" or non-technical resume for a technical role should score very low on Technical Skills.
+ROLE CALIBRATION:
+  - Assume this is an internship or entry-level role unless the JD explicitly requires experienced hiring.
+  - For internship roles, strong academic projects, hackathons, personal projects, and deployed side projects are valid evidence.
+  - However, projects should still be weighted lower than internships or professional work unless they show deployment, measurable outcomes, real users, or clear complexity.
+  - Lack of formal work experience should NOT automatically disqualify a candidate for an intern role.
 
-RECOMMENDATION RULE (based on the weighted final score):
-  >= 70 → "Strong Fit"
-  45-69 → "Moderate Fit"
-  < 45  → "Not Fit"
+HARD RULES — these override everything else:
+  ✗ Student or fresher applying for a role requiring 3+ years → Experience ≤ 35
+  ✗ Missing a required core technology entirely → Technical Skills loses 5 points minimum per missing item
+  ✗ Unrelated domain (e.g. management resume for engineering role) → Technical Skills ≤ 25
+  ✗ No mention of required tool/framework → cannot score that skill above 50
+  ✗ Do not infer skills from job titles alone
+  ✗ Do not assume proficiency from coursework unless supported by projects, internships, or practical work
+  ✗ If a technology is mentioned only once without context, treat it as weak evidence, not strong proficiency
+  ✗ Scores ≥ 80 require explicit written evidence in the resume — not assumed
+  ✗ "Strong Fit" is reserved for candidates who meet ≥ 80% of JD requirements with proof
+
+SCORE DISTRIBUTION EXPECTATION:
+  In a typical applicant pool: ~20% Strong Fit, ~40% Moderate Fit, ~40% Not Fit.
+  If you are scoring everyone above 70, you are being too lenient. Recalibrate.
 
 --- JOB DESCRIPTION ---
 ${jd}
