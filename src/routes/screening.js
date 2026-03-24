@@ -4,6 +4,7 @@ const upload = require('../middleware/upload');
 const { validateScreening } = require('../middleware/validateRequest');
 const { screenCandidates } = require('../controllers/screeningController');
 
-router.post('/screen', upload.array('resumes', 10), validateScreening, screenCandidates);
+// Multipart → validation → streaming SSE controller
+router.post('/screen', upload.array('resumes', 20), validateScreening, screenCandidates);
 
 module.exports = router;

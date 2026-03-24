@@ -1,32 +1,59 @@
 const JD        = require('../models/JD');
 const Session   = require('../models/Session');
 const Candidate = require('../models/Candidate');
-const { extractText }       = require('../services/pdfService');
-const { screenResume }      = require('../services/geminiService');
-const { calculateFinalScore } = require('../services/scoringService');
+const { extractText }          = require('../services/pdfService');
+const { screenResume }         = require('../services/geminiService');
+const { calculateFinalScore }  = require('../services/scoringService');
 const { buildScreeningPrompt } = require('../utils/promptBuilder');
 const { validateWeightages }   = require('../middleware/validateRequest');
+const { asyncPool }            = require('../utils/asyncPool');
 
 const DEFAULT_WEIGHTAGES = { technicalSkills: 40, experience: 30, education: 20, softSkills: 10 };
+const CONCURRENCY = 3; // max parallel Gemini calls
 
+// ── SSE helpers ──────────────────────────────────────────────────────────────
+const sseHeaders = {
+  'Content-Type':  'text/event-stream',
+  'Cache-Control': 'no-cache',
+  'Connection':    'keep-alive',
+  'X-Accel-Buffering': 'no',   // disable nginx buffering
+};
+
+const sendEvent = (res, event, data) => {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+};
+
+// ── Controller ───────────────────────────────────────────────────────────────
 const screenCandidates = async (req, res, next) => {
+  // Switch to SSE immediately so the client gets live progress
+  res.writeHead(200, sseHeaders);
+
+  // Keep-alive ping every 20 s to prevent proxy timeouts
+  const keepAlive = setInterval(() => res.write(': ping\n\n'), 20000);
+  const finish = () => { clearInterval(keepAlive); res.end(); };
+
   try {
-    if (!req.files || req.files.length === 0)
-      return res.status(400).json({ success: false, message: 'At least one resume PDF is required' });
+    // ── Validate inputs ──────────────────────────────────────────────────────
+    if (!req.files || req.files.length === 0) {
+      sendEvent(res, 'error', { message: 'At least one resume file is required' });
+      return finish();
+    }
 
     const { jdId } = req.body;
 
-    // Parse & validate weightages
     let weightages = DEFAULT_WEIGHTAGES;
     if (req.body.weightages) {
       let parsed;
       try {
-        parsed = typeof req.body.weightages === 'string' ? JSON.parse(req.body.weightages) : req.body.weightages;
+        parsed = typeof req.body.weightages === 'string'
+          ? JSON.parse(req.body.weightages)
+          : req.body.weightages;
       } catch {
-        return res.status(400).json({ success: false, message: 'Invalid weightages JSON' });
+        sendEvent(res, 'error', { message: 'Invalid weightages JSON' });
+        return finish();
       }
       const err = validateWeightages(parsed);
-      if (err) return res.status(400).json({ success: false, message: err });
+      if (err) { sendEvent(res, 'error', { message: err }); return finish(); }
       weightages = {
         technicalSkills: Number(parsed.technicalSkills),
         experience:      Number(parsed.experience),
@@ -35,80 +62,98 @@ const screenCandidates = async (req, res, next) => {
       };
     }
 
-    // Validate JD
     const jd = await JD.findById(jdId).lean();
-    if (!jd) return res.status(404).json({ success: false, message: 'JD not found' });
+    if (!jd) {
+      sendEvent(res, 'error', { message: 'JD not found' });
+      return finish();
+    }
 
-    // Create session upfront
     const session = await Session.create({ jdId: jd._id, jdTitle: jd.title, weightages });
 
-    // ── Step 1: Extract text from all PDFs in parallel ──────────────────────
+    const total = req.files.length;
+    sendEvent(res, 'start', { total, sessionId: session._id });
+
+    // ── Step 1: Extract text — pass full file object so extractor knows the type ──
     const extractionResults = await Promise.allSettled(
       req.files.map(async (file) => {
-        const rawText = await extractText(file.buffer);
+        const rawText = await extractText(file.buffer, file); // <-- file passed here
         return { fileName: file.originalname, rawText };
       })
     );
 
-    // Separate successes from failures
     const extracted = [];
+    const failedExtraction = [];
     for (const result of extractionResults) {
       if (result.status === 'fulfilled') {
         extracted.push(result.value);
       } else {
-        console.error('PDF extraction failed:', result.reason.message);
-        // Skip unreadable PDFs rather than aborting the whole batch
+        failedExtraction.push(result.reason?.message || 'File extraction failed');
+        console.error('File extraction failed:', result.reason?.message);
       }
     }
 
     if (extracted.length === 0) {
-      const error = new Error('Could not extract text from any of the uploaded PDFs');
-      error.status = 422;
-      return next(error);
+      sendEvent(res, 'error', { message: 'Could not extract text from any of the uploaded files' });
+      return finish();
     }
 
-    // ── Step 2: Call Gemini for all resumes in parallel ──────────────────────
-    const scoringResults = await Promise.allSettled(
-      extracted.map(async ({ fileName, rawText }) => {
+    // ── Step 2: Screen with Gemini — concurrency-limited ────────────────────
+    let processed = 0;
+    const savedCandidates = [];
+
+    const scoringResults = await asyncPool(
+      CONCURRENCY,
+      extracted,
+      async ({ fileName, rawText }) => {
         const prompt   = buildScreeningPrompt(jd.content, rawText, weightages);
         const aiResult = await screenResume(prompt);
         const final    = calculateFinalScore(aiResult.scores, weightages);
-        return { fileName, rawText, aiResult, final };
-      })
+
+        const info = aiResult.candidate || {};
+        const candidate = await Candidate.create({
+          sessionId:      session._id,
+          fileName,
+          candidateName:  info.name  || '',
+          candidateEmail: info.email || '',
+          candidatePhone: info.phone || '',
+          rawText,
+          scores:         { ...aiResult.scores, final },
+          strengths:      aiResult.strengths,
+          gaps:           aiResult.gaps,
+          recommendation: aiResult.recommendation,
+          topSkills:      aiResult.topSkills,
+          explanation:    aiResult.explanation,
+        });
+
+        processed++;
+        sendEvent(res, 'progress', {
+          processed,
+          total,
+          fileName,
+          candidateName:  info.name || '',
+          recommendation: aiResult.recommendation,
+          finalScore:     final,
+        });
+
+        return candidate;
+      }
     );
 
-    // ── Step 3: Persist all successful results in parallel ───────────────────
-    const savePromises = [];
+    // Collect successful saves
     for (const result of scoringResults) {
       if (result.status === 'fulfilled') {
-        const { fileName, rawText, aiResult, final } = result.value;
-        savePromises.push(
-          Candidate.create({
-            sessionId:      session._id,
-            fileName,
-            rawText,
-            scores:         { ...aiResult.scores, final },
-            strengths:      aiResult.strengths,
-            gaps:           aiResult.gaps,
-            recommendation: aiResult.recommendation,
-            topSkills:      aiResult.topSkills,
-            explanation:    aiResult.explanation,
-          })
-        );
+        savedCandidates.push(result.value);
       } else {
-        console.error('Gemini scoring failed for a resume:', result.reason.message);
+        console.error('Gemini/save failed for a resume:', result.reason?.message);
       }
     }
 
-    const savedCandidates = await Promise.all(savePromises);
-
     if (savedCandidates.length === 0) {
-      const error = new Error('AI service error, please try again');
-      error.status = 502;
-      return next(error);
+      sendEvent(res, 'error', { message: 'AI service error — no resumes could be scored. Please try again.' });
+      return finish();
     }
 
-    // ── Step 4: Assign ranks & update session ────────────────────────────────
+    // ── Step 3: Rank & finalise ──────────────────────────────────────────────
     savedCandidates.sort((a, b) => b.scores.final - a.scores.final);
 
     const ranked = await Promise.all(
@@ -122,6 +167,9 @@ const screenCandidates = async (req, res, next) => {
     const results = ranked.map((c) => ({
       rank:           c.rank,
       fileName:       c.fileName,
+      candidateName:  c.candidateName,
+      candidateEmail: c.candidateEmail,
+      candidatePhone: c.candidatePhone,
       scores:         c.scores,
       strengths:      c.strengths,
       gaps:           c.gaps,
@@ -130,9 +178,18 @@ const screenCandidates = async (req, res, next) => {
       explanation:    c.explanation,
     }));
 
-    res.status(201).json({ success: true, sessionId: session._id, results });
+    // ── Step 4: Send final result ────────────────────────────────────────────
+    sendEvent(res, 'done', {
+      sessionId: session._id,
+      results,
+      failedCount: total - savedCandidates.length,
+    });
+
   } catch (error) {
-    next(error);
+    console.error('screenCandidates error:', error);
+    sendEvent(res, 'error', { message: error.message || 'Internal server error' });
+  } finally {
+    finish();
   }
 };
 

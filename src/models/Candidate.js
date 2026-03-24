@@ -3,6 +3,12 @@ const mongoose = require('mongoose');
 const candidateSchema = new mongoose.Schema({
   sessionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Session', required: true },
   fileName: { type: String, required: true },
+
+  // Extracted candidate info
+  candidateName:  { type: String, default: '' },
+  candidateEmail: { type: String, default: '' },
+  candidatePhone: { type: String, default: '' },
+
   rawText: { type: String },
   scores: {
     technicalSkills: { type: Number },
